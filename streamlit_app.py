@@ -4,6 +4,9 @@ import pandas as pd
 import dill
 import plotly.graph_objects as go
 
+# Enable wide mode
+st.set_page_config(layout="wide")
+
 def create_ring_plot(probability, title):
     """
     Creates a ring (donut) plot to visualize risk probability.
@@ -98,9 +101,6 @@ feature_types = {}
 feature_types.update(predictor.feature_metadata.type_map_raw)
 feature_types.update(card_predictor.feature_metadata.type_map_raw)
 feature_types.update(sepsis_predictor.feature_metadata.type_map_raw)
-
-# Enable wide mode
-st.set_page_config(layout="wide")
 
 # Set up the Streamlit app
 st.title('Mortality Risk Prediction for Hemodialysis Patients in Intensive Care Units')
