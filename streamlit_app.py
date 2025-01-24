@@ -63,7 +63,7 @@ def convert_strings_to_paths(obj):
     # Add more conditions if necessary
     return obj
 
-@st.cache_data
+@st.cache_resource
 def loadsupport():
 	with open('selected_models2.pkl', 'rb') as f:
 	    loaded_vars = pickle.load(f)
