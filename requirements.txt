@@ -1,2 +1,3 @@
 streamlit
 autogluon
+xgboost==1.6.0
