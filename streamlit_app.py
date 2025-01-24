@@ -60,27 +60,23 @@ def convert_strings_to_paths(obj):
     # Add more conditions if necessary
     return obj
 
-with open('selected_models2.pkl', 'rb') as f:
-    loaded_vars = pickle.load(f)
+@st.cache_resource
+def loadsupport():
+	with open('selected_models2.pkl', 'rb') as f:
+	    loaded_vars = pickle.load(f)
 
-# Optionally, convert string paths back to Path objects
-loaded_vars = {k: convert_strings_to_paths(v) for k, v in loaded_vars.items()}
+	# Optionally, convert string paths back to Path objects
+	loaded_vars = {k: convert_strings_to_paths(v) for k, v in loaded_vars.items()}
 
+	predictorall = loaded_vars.get('predictorall')
+	predictorcardfull = loaded_vars.get('predictorcardfull')
+	predictorsepsisfull = loaded_vars.get('predictorsepsisfull')
 
-predictorall = loaded_vars.get('predictorall')
-#predictorall = TabularPredictor.load('allcause_model',require_version_match=False,require_py_version_match=False)
+	emer = loaded_vars.get('emer')
+	
+	return predictorall, predictorcardfull, predictorsepsisfull, emer
 
-predictorcardfull = loaded_vars.get('predictorcardfull')
-
-predictorsepsisfull = loaded_vars.get('predictorsepsisfull')
-
-emer = loaded_vars.get('emer')
-
-
-# Load predictors
-predictor = predictorall  # All-cause mortality predictor
-card_predictor = predictorcardfull  # Cardiovascular mortality predictor
-sepsis_predictor = predictorsepsisfull  # Infection-related mortality predictor
+predictor, card_predictor, sepsis_predictor, emer = loadsupport()
 
 # Load the DataFrame with average values
 # Assuming 'emer' DataFrame is loaded via dill.load_session()
