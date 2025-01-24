@@ -60,16 +60,21 @@ def convert_strings_to_paths(obj):
     # Add more conditions if necessary
     return obj
 
+@st.cache_resource
 with open('selected_models2.pkl', 'rb') as f:
     loaded_vars = pickle.load(f)
 
 # Optionally, convert string paths back to Path objects
 loaded_vars = {k: convert_strings_to_paths(v) for k, v in loaded_vars.items()}
 
+@st.cache_resource
 predictorall = loaded_vars.get('predictorall')
 #predictorall = TabularPredictor.load('allcause_model',require_version_match=False,require_py_version_match=False)
+@st.cache_resource
 predictorcardfull = loaded_vars.get('predictorcardfull')
+@st.cache_resource
 predictorsepsisfull = loaded_vars.get('predictorsepsisfull')
+@st.cache_data
 emer = loaded_vars.get('emer')
 
 
