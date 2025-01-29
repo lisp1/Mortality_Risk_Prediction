@@ -3,6 +3,7 @@ from autogluon.tabular import TabularPredictor
 import pandas as pd
 import dill
 import plotly.graph_objects as go
+import os
 
 # Enable wide mode
 st.set_page_config(layout="wide")
