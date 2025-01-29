@@ -72,7 +72,7 @@ def load_pickle_file(filename):
 @st.cache_resource
 def loadsupport():
     # Helper function to load and optionally convert pickle files
-    def load_pickle_file(filename, convert=True, extract_first=False):
+    def load_pickle_file(filename, convert=True, extract_first=True):
         if not os.path.exists(filename):
             raise FileNotFoundError(f"Required file '{filename}' not found.")
         with open(filename, 'rb') as f:
