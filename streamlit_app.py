@@ -74,16 +74,21 @@ def loadsupport():
     # Helper function to load and optionally convert pickle files
     def load_pickle_file(filename, convert=True, extract_first=False):
         if not os.path.exists(filename):
-            raise FileNotFoundError(f"Required file {filename} not found.")
+            raise FileNotFoundError(f"Required file '{filename}' not found.")
         with open(filename, 'rb') as f:
             data = pickle.load(f)
+        
+        # If the data is a list and we expect a single object, extract it
         if extract_first:
-            if isinstance(data, list) and len(data) > 0:
+            if isinstance(data, list) and len(data) == 1:
                 data = data[0]
             else:
-                raise ValueError(f"Loaded data from {filename} is not a non-empty list.")
-        if convert and not isinstance(data, (list, dict, ...)):  # Adjust condition as needed
+                raise ValueError(f"Loaded data from '{filename}' is not a single-element list.")
+        
+        # Apply conversion if needed (excluding DataFrames)
+        if convert and not isinstance(data, pd.DataFrame):
             data = convert_strings_to_paths(data)
+        
         return data
 
     # Load each pickle file
