@@ -70,25 +70,26 @@ def load_pickle_file(filename):
 
 @st.cache_resource
 def loadsupport():
-    # Load predictorall from predictorall.pkl
-    with open('predictorall.pkl', 'rb') as f:
-        predictorall = pickle.load(f)
-    predictorall = convert_strings_to_paths(predictorall)
-    
-    # Load predictorcardfull from predictorcard.pkl
-    with open('predictorcard.pkl', 'rb') as f:
-        predictorcardfull = pickle.load(f)
-    predictorcardfull = convert_strings_to_paths(predictorcardfull)
-    
-    # Load predictorsepsisfull from predictorsepsis.pkl
-    with open('predictorsepsis.pkl', 'rb') as f:
-        predictorsepsisfull = pickle.load(f)
-    predictorsepsisfull = convert_strings_to_paths(predictorsepsisfull)
-    
-    # Load emer dataframe from emer.pkl
-    with open('emer.pkl', 'rb') as f:
-        emer = pickle.load(f)
-    emer = convert_strings_to_paths(emer)  # Apply only if necessary for the dataframe
+    # Helper function to load and optionally convert pickle files
+    def load_pickle_file(filename, convert=True, extract_first=False):
+        if not os.path.exists(filename):
+            raise FileNotFoundError(f"Required file {filename} not found.")
+        with open(filename, 'rb') as f:
+            data = pickle.load(f)
+        if extract_first:
+            if isinstance(data, list) and len(data) > 0:
+                data = data[0]
+            else:
+                raise ValueError(f"Loaded data from {filename} is not a non-empty list.")
+        if convert and not isinstance(data, (list, dict, ...)):  # Adjust condition as needed
+            data = convert_strings_to_paths(data)
+        return data
+
+    # Load each pickle file
+    predictorall = load_pickle_file('predictorall.pkl')
+    predictorcardfull = load_pickle_file('predictorcard.pkl')
+    predictorsepsisfull = load_pickle_file('predictorsepsis.pkl')
+    emer = load_pickle_file('emer.pkl', convert=False, extract_first=True)  # Extract dataframe from list
     
     return predictorall, predictorcardfull, predictorsepsisfull, emer
 
