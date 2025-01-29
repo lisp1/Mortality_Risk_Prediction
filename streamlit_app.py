@@ -63,21 +63,20 @@ def convert_strings_to_paths(obj):
     # Add more conditions if necessary
     return obj
 
+def load_pickle_file(filename):
+    """Utility function to load a pickle file."""
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
+
 @st.cache_resource
 def loadsupport():
-	with open('selected_models2.pkl', 'rb') as f:
-	    loaded_vars = pickle.load(f)
+    """Load variables from four separate pickle files."""
+    predictorall = load_pickle_file('predictorall.pkl')
+    predictorcardfull = load_pickle_file('predictorcard.pkl')
+    predictorsepsisfull = load_pickle_file('predictorsepsis.pkl')
+    emer = load_pickle_file('emer.pkl')
 
-	# Optionally, convert string paths back to Path objects
-	loaded_vars = {k: convert_strings_to_paths(v) for k, v in loaded_vars.items()}
-
-	predictorall = loaded_vars.get('predictorall')
-	predictorcardfull = loaded_vars.get('predictorcardfull')
-	predictorsepsisfull = loaded_vars.get('predictorsepsisfull')
-
-	emer = loaded_vars.get('emer')
-	
-	return predictorall, predictorcardfull, predictorsepsisfull, emer
+    return predictorall, predictorcardfull, predictorsepsisfull, emer
 
 predictor, card_predictor, sepsis_predictor, emer = loadsupport()
 
