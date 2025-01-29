@@ -70,12 +70,26 @@ def load_pickle_file(filename):
 
 @st.cache_resource
 def loadsupport():
-    """Load variables from four separate pickle files."""
-    predictorall = load_pickle_file('predictorall.pkl')
-    predictorcardfull = load_pickle_file('predictorcard.pkl')
-    predictorsepsisfull = load_pickle_file('predictorsepsis.pkl')
-    emer = load_pickle_file('emer.pkl')
-
+    # Load predictorall from predictorall.pkl
+    with open('predictorall.pkl', 'rb') as f:
+        predictorall = pickle.load(f)
+    predictorall = convert_strings_to_paths(predictorall)
+    
+    # Load predictorcardfull from predictorcard.pkl
+    with open('predictorcard.pkl', 'rb') as f:
+        predictorcardfull = pickle.load(f)
+    predictorcardfull = convert_strings_to_paths(predictorcardfull)
+    
+    # Load predictorsepsisfull from predictorsepsis.pkl
+    with open('predictorsepsis.pkl', 'rb') as f:
+        predictorsepsisfull = pickle.load(f)
+    predictorsepsisfull = convert_strings_to_paths(predictorsepsisfull)
+    
+    # Load emer dataframe from emer.pkl
+    with open('emer.pkl', 'rb') as f:
+        emer = pickle.load(f)
+    emer = convert_strings_to_paths(emer)  # Apply only if necessary for the dataframe
+    
     return predictorall, predictorcardfull, predictorsepsisfull, emer
 
 predictor, card_predictor, sepsis_predictor, emer = loadsupport()
