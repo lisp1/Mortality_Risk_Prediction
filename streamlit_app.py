@@ -4,6 +4,8 @@ import pandas as pd
 import dill
 import plotly.graph_objects as go
 import os
+import shap
+from explain_and_export import compute_local_shap, export_figure6
 
 # Enable wide mode
 st.set_page_config(layout="wide")
