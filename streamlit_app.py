@@ -1,7 +1,12 @@
 # streamlit_app.py
 # ------------------------------------------------------------
 # Hemodialysis ICU mortality prediction + patient-level SHAP
-# Robust per-model KernelExplainer + custom waterfall to avoid PIL errors
+# FIXES:
+#  - KernelExplainer with link="logit" (log-odds) so contributions are not ~0
+#  - Robust positive-class extraction, strict per-model feature subsets/order
+#  - Increased nsamples for stability
+#  - Custom Matplotlib "force/waterfall" (log-odds) -> no blank plots, no PIL bomb
+#  - Camera-ready Figure 6 exporter retained
 # ------------------------------------------------------------
 
 import os
@@ -49,7 +54,6 @@ def loadsupport():
         with open(filename, 'rb') as f:
             data = pickle.load(f)
         if extract_first:
-            # our pickles store a single object inside a one-element list
             if isinstance(data, list) and len(data) == 1:
                 data = data[0]
             else:
@@ -76,13 +80,13 @@ sepsis_features   = set(sepsis_predictor.feature_metadata.get_features())
 all_features      = allcause_features.union(card_features).union(sepsis_features)
 feature_names_list = list(all_features)
 
-# raw type map (union)
+# union raw type map
 feature_types = {}
 feature_types.update(predictor.feature_metadata.type_map_raw)
 feature_types.update(card_predictor.feature_metadata.type_map_raw)
 feature_types.update(sepsis_predictor.feature_metadata.type_map_raw)
 
-# ---------- Display names mapping (from original app) ----------
+# ---------- Display names mapping (from your original app) ----------
 display_names = {
     '昏迷/意识丧失模糊': 'Coma(0/1)',
     '心肺复苏': 'Use of Cardiopulmonary Resuscitation(0/1)',
@@ -112,9 +116,9 @@ display_names = {
     '心衰': 'Heart Failure(0/1)'
 }
 for f in feature_names_list:
-    display_names.setdefault(f, f)  # fallback to original name if missing
+    display_names.setdefault(f, f)  # fallback to original if not mapped
 
-# ---------- Bulk input order & helpers ----------
+# ---------- Bulk input (ordered) ----------
 st.write('Alternatively, you can input all values separated by commas. If entered this way, the values will automatically populate each input field to ensure accurate recognition.')
 
 bulk_input_order = [
@@ -154,7 +158,6 @@ for name in bulk_input_order:
         st.error(f"Display name '{name}' does not correspond to any feature.")
         st.stop()
     feature_names_list_ordered.append(feat)
-
 num_features = len(feature_names_list_ordered)
 
 st.write(', '.join(bulk_input_order))
@@ -170,7 +173,7 @@ bulk_input = st.text_area(
     value='', height=100
 )
 
-# ---------- Gauge plot (kept) ----------
+# ---------- Gauge plot ----------
 def create_ring_plot(probability, title):
     if probability < 0.33:
         color = 'green'
@@ -191,13 +194,13 @@ def create_ring_plot(probability, title):
     )
     return fig
 
-# ---------- Build input widgets ----------
+# ---------- Build input UI ----------
 input_data = {}
 missing_features = []
 columns_per_row = 6
 rows = (num_features + columns_per_row - 1) // columns_per_row
 
-# parse bulk input
+# Parse bulk input if provided
 if bulk_input.strip() != '':
     bulk_values = [x.strip() for x in bulk_input.strip().split(',')]
     if len(bulk_values) != num_features:
@@ -219,7 +222,7 @@ if bulk_input.strip() != '':
                     st.stop()
             input_data[feature] = value
 
-# render inputs
+# Draw inputs
 for r in range(rows):
     cols = st.columns(columns_per_row)
     for idx in range(columns_per_row):
@@ -251,7 +254,7 @@ for r in range(rows):
                     value = st.text_input(f"{display_name}:", value=str(default_value), key=feature)
             input_data[feature] = value
 
-# ---------- SHAP helpers ----------
+# ---------- SHAP helpers (LOGIT link for classification) ----------
 def get_positive_label(predictor_obj):
     try:
         labels = predictor_obj.class_labels
@@ -286,58 +289,71 @@ def proba_callable_for_shap(predictor_obj, feature_names, positive_label):
         return arr.astype(float)
     return f
 
-def compute_local_shap_kernel(predictor_obj, x_row_df, background_df, feature_map, max_bg=50):
+def compute_local_shap_kernel_logit(predictor_obj, x_row_df, background_df, feature_map,
+                                    max_bg=100, nsamples=None):
     """
-    Robust per-patient SHAP on probability scale using KernelExplainer.
-    Returns: shap_df (with display names), expected_value (base), fx
+    Robust per-patient SHAP on probability function, but in LOGIT space.
+    Returns: shap_df (display names), base_logit, pred_logit, base_prob, pred_prob
     """
     feature_names = list(x_row_df.columns)
     pos_label = get_positive_label(predictor_obj)
-    f = proba_callable_for_shap(predictor_obj, feature_names, pos_label)
+    fprob = proba_callable_for_shap(predictor_obj, feature_names, pos_label)
 
-    # background: exact columns, clean, capped for speed
+    # Clean background: exact columns, drop nans, cap size for speed
     bg = background_df[feature_names].dropna()
     if len(bg) == 0:
-        # fallback: use the row itself as background
         bg = x_row_df.copy()
     else:
         bg = bg.sample(n=min(max_bg, len(bg)), random_state=0)
 
-    # KernelExplainer on probability scale
-    explainer = shap.KernelExplainer(f, bg, link="identity")
-    shap_vals = explainer.shap_values(x_row_df, nsamples="auto")
-    # shap_vals can be list or ndarray depending on SHAP version
-    shap_arr = np.array(shap_vals)
-    if shap_arr.ndim == 3:
-        # shape: (n_outputs, n_rows, n_features) -> pick output 0
-        shap_row = shap_arr[0, 0, :]
-    elif shap_arr.ndim == 2:
-        # shape: (n_rows, n_features)
-        shap_row = shap_arr[0, :]
-    else:
-        shap_row = shap_arr.reshape(-1)
+    # KernelExplainer on LOGIT link -> well-scaled contributions for classifiers
+    explainer = shap.KernelExplainer(fprob, bg, link="logit")
 
-    expected_value = float(np.array(explainer.expected_value).reshape(-1)[-1])
-    fx = float(f(x_row_df.values)[0])
+    # nsamples heuristic for stability on single-row explanations
+    if nsamples is None:
+        nsamples = max(200, 2 * (len(feature_names) ** 2))
+
+    shap_vals = explainer.shap_values(x_row_df, nsamples=nsamples)
+    # normalize shapes
+    svarr = np.array(shap_vals)
+    if svarr.ndim == 3:  # (n_outputs, n_rows, n_features)
+        phi = svarr[0, 0, :]
+    elif svarr.ndim == 2:  # (n_rows, n_features)
+        phi = svarr[0, :]
+    else:
+        phi = svarr.reshape(-1)
+
+    # base & pred in logit space (expected_value can be array or scalar)
+    base_logit = float(np.array(explainer.expected_value).reshape(-1)[-1])
+
+    # actual predicted probability & logit
+    p_pred = float(fprob(x_row_df.values)[0])
+    # avoid div-by-zero in logit
+    p_pred = np.clip(p_pred, 1e-8, 1 - 1e-8)
+    pred_logit = float(np.log(p_pred / (1 - p_pred)))
+
+    # also provide probabilities for annotations
+    base_prob = float(1 / (1 + np.exp(-base_logit)))
+    pred_prob = p_pred
 
     shap_df = pd.DataFrame({
         'feature': feature_names,
         'value': [x_row_df.iloc[0][c] for c in feature_names],
-        'shap': shap_row.astype(float)
+        'shap_logit': phi.astype(float)
     })
-    shap_df['abs_shap'] = shap_df['shap'].abs()
+    shap_df['abs_shap'] = shap_df['shap_logit'].abs()
     shap_df.sort_values('abs_shap', ascending=False, inplace=True)
     shap_df['feature_display'] = shap_df['feature'].map(lambda x: feature_map.get(x, x))
-    return shap_df, expected_value, fx
+    return shap_df, base_logit, pred_logit, base_prob, pred_prob
 
-def plot_topk_bar(ax, shap_df, top_k=8, title=""):
+def plot_topk_bar_logit(ax, shap_df, top_k=8, title=""):
     top = shap_df.head(top_k).copy()
     labels = [f"{r.feature_display} = {r.value}" for r in top.itertuples(index=False)]
     y = np.arange(len(top))[::-1]
-    ax.barh(y, top['shap'].values[::-1], align='center')
+    ax.barh(y, top['shap_logit'].values[::-1], align='center')
     ax.set_yticks(y, labels=labels[::-1], fontsize=8)
     ax.axvline(0, color='k', linewidth=0.6)
-    ax.set_xlabel("SHAP contribution to P(death)")
+    ax.set_xlabel("SHAP (log-odds)")
     if title:
         ax.set_title(title, fontsize=12)
 
@@ -357,7 +373,7 @@ def export_figure6(input_display_pairs,
                    outfile_svg="figure6_multiplot.svg"):
     """
     Build a 3x3 layout:
-      A: inputs table; B–D: donuts; E–G: SHAP bars.
+      A: inputs table; B–D: donuts; E–G: SHAP bars (log-odds).
     """
     plt.close('all')
     fig = plt.figure(figsize=(12, 8), dpi=300)
@@ -386,12 +402,12 @@ def export_figure6(input_display_pairs,
     axD = fig.add_subplot(gs[1, 1]); draw_donut(axD, risk_infection, "Infection‑related mortality")
     axD.text(-0.08, 1.05, "D", transform=axD.transAxes, fontsize=14, fontweight='bold', va='top')
 
-    # E–G SHAP bars
-    axE = fig.add_subplot(gs[1:, 0]); plot_topk_bar(axE, shap_allcause, top_k=8, title="All‑cause: top contributors")
+    # E–G SHAP bars (log-odds)
+    axE = fig.add_subplot(gs[1:, 0]); plot_topk_bar_logit(axE, shap_allcause, top_k=8, title="All‑cause: top contributors")
     axE.text(-0.08, 1.05, "E", transform=axE.transAxes, fontsize=14, fontweight='bold', va='top')
-    axF = fig.add_subplot(gs[1:, 1]); plot_topk_bar(axF, shap_cardio, top_k=8, title="Cardiovascular: top contributors")
+    axF = fig.add_subplot(gs[1:, 1]); plot_topk_bar_logit(axF, shap_cardio, top_k=8, title="Cardiovascular: top contributors")
     axF.text(-0.08, 1.05, "F", transform=axF.transAxes, fontsize=14, fontweight='bold', va='top')
-    axG = fig.add_subplot(gs[1:, 2]); plot_topk_bar(axG, shap_infect, top_k=8, title="Infection‑related: top contributors")
+    axG = fig.add_subplot(gs[1:, 2]); plot_topk_bar_logit(axG, shap_infect, top_k=8, title="Infection‑related: top contributors")
     axG.text(-0.08, 1.05, "G", transform=axG.transAxes, fontsize=14, fontweight='bold', va='top')
 
     fig.tight_layout()
@@ -400,46 +416,48 @@ def export_figure6(input_display_pairs,
         fig.savefig(outfile_svg, bbox_inches='tight')
     return outfile_png, outfile_svg
 
-def plot_custom_waterfall(ax, shap_df, base_value, fx, top_k=10, title=""):
+def plot_custom_waterfall_logit(ax, shap_df, base_logit, pred_logit, base_prob, pred_prob,
+                                top_k=10, title=""):
     """
-    Draw a probability-scale waterfall without using shap.plots.waterfall (avoids PIL errors).
-    base_value + sum(shap) ~= fx.
+    Probability model explained in LOGIT space.
+    base_logit + sum(phi_i) = pred_logit
+    We show stacked contributions (neg left / pos right) and annotate probs.
     """
     top = shap_df.head(top_k).copy()
-    # sort so negative first -> leftward, positive next -> rightward for clean stacking
-    top = top.sort_values('shap')
-    contribs = top['shap'].values
+    # Separate negative vs positive for clean stacking
+    top = top.sort_values('shap_logit')
+    phi = top['shap_logit'].values
     names = top['feature_display'].values
 
-    # cumulative positions
-    starts = [base_value]
-    for s in contribs[:-1]:
+    # cumulative starts in logit space
+    starts = [base_logit]
+    for s in phi[:-1]:
         starts.append(starts[-1] + s)
     starts = np.array(starts)
-    widths = np.abs(contribs)
-    lefts = np.where(contribs >= 0, starts, starts + contribs)
+    widths = np.abs(phi)
+    lefts = np.where(phi >= 0, starts, starts + phi)
 
     y = np.arange(len(top))
-    colors = ['red' if s > 0 else 'blue' for s in contribs]
+    colors = ['red' if s > 0 else 'blue' for s in phi]
     ax.barh(y, widths, left=lefts, color=colors, align='center', edgecolor='none')
     ax.set_yticks(y, labels=[str(n) for n in names], fontsize=8)
-    ax.axvline(base_value, color='gray', linestyle='--', linewidth=0.8, label='base')
-    ax.axvline(fx, color='black', linestyle='-', linewidth=1.0, label='prediction')
-    ax.set_xlabel("Predicted probability")
+    ax.axvline(base_logit, color='gray', linestyle='--', linewidth=0.8, label=f'base (p={base_prob:.2f})')
+    ax.axvline(pred_logit, color='black', linestyle='-', linewidth=1.0, label=f'pred (p={pred_prob:.2f})')
+    ax.set_xlabel("Log-odds")
     if title:
         ax.set_title(title, fontsize=12)
     ax.legend(frameon=False, fontsize=8)
-    # Ensure visible padding
-    xmin = min(base_value, fx, lefts.min()) - 0.02
-    xmax = max(base_value, fx, (lefts + widths).max()) + 0.02
+    # margins
+    xmin = min(base_logit, pred_logit, lefts.min()) - 0.25
+    xmax = max(base_logit, pred_logit, (lefts + widths).max()) + 0.25
     ax.set_xlim(xmin, xmax)
 
 # ---------- Prediction & Explanations ----------
 if st.button('Predict'):
-    # build input row
+    # 1) Build input row
     input_df = pd.DataFrame([input_data])
 
-    # impute missing & record what we imputed
+    # 2) Impute missing & record imputed values
     missing_features = []
     missing_values_used = {}
     for feature in feature_names_list_ordered:
@@ -462,12 +480,12 @@ if st.button('Predict'):
                 missing_features.append(display_names.get(feature, feature))
                 missing_values_used[display_names.get(feature, feature)] = None
 
-    # normalize datetimes
+    # Normalize datetimes
     for feature, ftype in feature_types.items():
         if ftype == 'datetime' and feature in input_df.columns:
             input_df[feature] = pd.to_datetime(input_df[feature])
 
-    # predictions
+    # 3) Predictions
     prediction = predictor.predict(input_df)
     probability = predictor.predict_proba(input_df)
     card_prediction = card_predictor.predict(input_df)
@@ -497,7 +515,7 @@ if st.button('Predict'):
     card_risk_probability = _pick_pos(card_probability, card_predictor)
     sepsis_risk_probability = _pick_pos(sepsis_probability, sepsis_predictor)
 
-    # results UI
+    # 4) Show donut results
     st.subheader('Prediction Results')
     cols = st.columns(3)
 
@@ -522,17 +540,17 @@ if st.button('Predict'):
         st.plotly_chart(create_ring_plot(sepsis_risk_probability, "Probability of Infection-related Mortality"), use_container_width=True)
         st.write(f"Predicted Risk of Infection-related mortality: {sepsis_risk_probability:.2%}")
 
-    # imputed variables transparency
+    # 5) Imputation transparency
     if missing_features:
         st.warning("The following variables were missing and have been filled with average/mode values:")
         for var in missing_features:
             st.write(f"{var}: {missing_values_used[var]}")
 
-    # ---------- Patient-specific SHAP ----------
+    # ---------- Patient‑specific SHAP in LOGIT space ----------
     st.markdown("### Patient‑specific feature contributions (SHAP)")
-    st.caption("Bars to the right increase predicted risk; bars to the left decrease risk (relative to the model’s base rate).")
+    st.caption("Bars reflect SHAP values in log‑odds (positive increases risk; negative decreases risk).")
 
-    # exact per-model features & subsets
+    # exact per‑model feature subsets
     allcause_feats = [f for f in predictor.features() if f in emer_clean.columns]
     cardio_feats   = [f for f in card_predictor.features() if f in emer_clean.columns]
     infect_feats   = [f for f in sepsis_predictor.features() if f in emer_clean.columns]
@@ -545,66 +563,67 @@ if st.button('Predict'):
     bg_cardio   = emer_clean[cardio_feats]
     bg_infect   = emer_clean[infect_feats]
 
-    shap_allcause_df, base_allcause, fx_allcause = compute_local_shap_kernel(
-        predictor, x_allcause, bg_allcause, display_names, max_bg=50
+    shap_allcause_df, base_allcause_logit, pred_allcause_logit, base_allcause_p, fx_allcause_p = compute_local_shap_kernel_logit(
+        predictor, x_allcause, bg_allcause, display_names, max_bg=100
     )
-    shap_cardio_df, base_cardio, fx_cardio = compute_local_shap_kernel(
-        card_predictor, x_cardio, bg_cardio, display_names, max_bg=50
+    shap_cardio_df, base_cardio_logit, pred_cardio_logit, base_cardio_p, fx_cardio_p = compute_local_shap_kernel_logit(
+        card_predictor, x_cardio, bg_cardio, display_names, max_bg=100
     )
-    shap_infect_df, base_infect, fx_infect = compute_local_shap_kernel(
-        sepsis_predictor, x_infect, bg_infect, display_names, max_bg=50
+    shap_infect_df, base_infect_logit, pred_infect_logit, base_infect_p, fx_infect_p = compute_local_shap_kernel_logit(
+        sepsis_predictor, x_infect, bg_infect, display_names, max_bg=100
     )
 
     # three columns of SHAP bars + tables
     ecol = st.columns(3)
 
     def _fmt_table(df):
-        out = df[['feature_display','value','shap']].head(8).rename(
-            columns={'feature_display':'feature','shap':'contribution'}
+        out = df[['feature_display','value','shap_logit']].head(8).rename(
+            columns={'feature_display':'feature','shap_logit':'contribution (log-odds)'}
         ).copy()
-        # numeric formatting for readability
-        if 'contribution' in out.columns:
-            out['contribution'] = out['contribution'].astype(float).round(4)
+        out['contribution (log-odds)'] = out['contribution (log-odds)'].astype(float).round(3)
         return out
 
     with ecol[0]:
         st.markdown("**All‑cause: top drivers**")
         figA, axA = plt.subplots(figsize=(4, 3), dpi=150)
-        plot_topk_bar(axA, shap_allcause_df, top_k=8, title="")
+        plot_topk_bar_logit(axA, shap_allcause_df, top_k=8, title="")
         st.pyplot(figA, clear_figure=True)
         st.dataframe(_fmt_table(shap_allcause_df), use_container_width=True)
 
     with ecol[1]:
         st.markdown("**Cardiovascular: top drivers**")
         figB, axB = plt.subplots(figsize=(4, 3), dpi=150)
-        plot_topk_bar(axB, shap_cardio_df, top_k=8, title="")
+        plot_topk_bar_logit(axB, shap_cardio_df, top_k=8, title="")
         st.pyplot(figB, clear_figure=True)
         st.dataframe(_fmt_table(shap_cardio_df), use_container_width=True)
 
     with ecol[2]:
         st.markdown("**Infection‑related: top drivers**")
         figC, axC = plt.subplots(figsize=(4, 3), dpi=150)
-        plot_topk_bar(axC, shap_infect_df, top_k=8, title="")
+        plot_topk_bar_logit(axC, shap_infect_df, top_k=8, title="")
         st.pyplot(figC, clear_figure=True)
         st.dataframe(_fmt_table(shap_infect_df), use_container_width=True)
 
-    # ---------- Custom waterfall plots (no PIL error) ----------
+    # ---------- Custom LOGIT-space waterfalls (no blank plots) ----------
     with st.expander("Show SHAP waterfall plots (per‑patient)"):
         wcols = st.columns(3)
         with wcols[0]:
-            st.markdown("All‑cause waterfall")
+            st.markdown(f"All‑cause waterfall (base p={base_allcause_p:.2f} → pred p={fx_allcause_p:.2f})")
             figW, axW = plt.subplots(figsize=(5, 3), dpi=150)
-            plot_custom_waterfall(axW, shap_allcause_df, base_allcause, fx_allcause, top_k=10, title="")
+            plot_custom_waterfall_logit(axW, shap_allcause_df, base_allcause_logit, pred_allcause_logit,
+                                        base_allcause_p, fx_allcause_p, top_k=10, title="")
             st.pyplot(figW, clear_figure=True)
         with wcols[1]:
-            st.markdown("Cardiovascular waterfall")
+            st.markdown(f"Cardiovascular waterfall (base p={base_cardio_p:.2f} → pred p={fx_cardio_p:.2f})")
             figW2, axW2 = plt.subplots(figsize=(5, 3), dpi=150)
-            plot_custom_waterfall(axW2, shap_cardio_df, base_cardio, fx_cardio, top_k=10, title="")
+            plot_custom_waterfall_logit(axW2, shap_cardio_df, base_cardio_logit, pred_cardio_logit,
+                                        base_cardio_p, fx_cardio_p, top_k=10, title="")
             st.pyplot(figW2, clear_figure=True)
         with wcols[2]:
-            st.markdown("Infection‑related waterfall")
+            st.markdown(f"Infection‑related waterfall (base p={base_infect_p:.2f} → pred p={fx_infect_p:.2f})")
             figW3, axW3 = plt.subplots(figsize=(5, 3), dpi=150)
-            plot_custom_waterfall(axW3, shap_infect_df, base_infect, fx_infect, top_k=10, title="")
+            plot_custom_waterfall_logit(axW3, shap_infect_df, base_infect_logit, pred_infect_logit,
+                                        base_infect_p, fx_infect_p, top_k=10, title="")
             st.pyplot(figW3, clear_figure=True)
 
     # ---------- Export camera‑ready Figure 6 ----------
