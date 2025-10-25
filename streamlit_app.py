@@ -1,33 +1,33 @@
 # streamlit_app.py
+# ------------------------------------------------------------
+# Hemodialysis ICU mortality prediction + patient-level SHAP
+# Robust per-model KernelExplainer + custom waterfall to avoid PIL errors
+# ------------------------------------------------------------
+
 import os
 import pickle
 from pathlib import Path
 import pathlib
-
-import streamlit as st
-import pandas as pd
 import numpy as np
+import pandas as pd
+import streamlit as st
 from autogluon.tabular import TabularPredictor
 import plotly.graph_objects as go
 
-# NEW: SHAP + Matplotlib for patient-level plots and figure export
+# SHAP + plotting
 import shap
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use("Agg")  # headless backend for Streamlit
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from matplotlib.patches import Wedge
 
-# ------------------------------------------------------------
-# Streamlit page config
-# ------------------------------------------------------------
+# ---------- Streamlit page config ----------
 st.set_page_config(layout="wide")
 st.title('Mortality Risk Prediction for Hemodialysis Patients in Intensive Care Units')
 st.write('Enter the following values for a hemodialysis patient in the Intensive Care Unit to predict their death risk during hospitalization:')
 
-# ------------------------------------------------------------
-# Utilities for Windows/Posix pickle compatibility
-# ------------------------------------------------------------
+# ---------- Windows/Posix pickle compatibility ----------
 pathlib.WindowsPath = pathlib.PosixPath
 
 def convert_strings_to_paths(obj):
@@ -41,10 +41,6 @@ def convert_strings_to_paths(obj):
         return tuple(convert_strings_to_paths(item) for item in obj)
     return obj
 
-def load_pickle_file(filename):
-    with open(filename, 'rb') as f:
-        return pickle.load(f)
-
 @st.cache_resource
 def loadsupport():
     def _load_pickle(filename, convert=True, extract_first=True):
@@ -53,6 +49,7 @@ def loadsupport():
         with open(filename, 'rb') as f:
             data = pickle.load(f)
         if extract_first:
+            # our pickles store a single object inside a one-element list
             if isinstance(data, list) and len(data) == 1:
                 data = data[0]
             else:
@@ -69,27 +66,23 @@ def loadsupport():
 
 predictor, card_predictor, sepsis_predictor, emer = loadsupport()
 
-# ------------------------------------------------------------
-# Data pre-processing
-# ------------------------------------------------------------
+# ---------- Data pre-processing ----------
 emer_clean = emer.dropna(how='any', inplace=False)
 
-# Features used for the UI (we’ll use each model’s own features for SHAP)
+# features used by each model (restrict SHAP to these)
 allcause_features = set(predictor.feature_metadata.get_features())
-card_features = set(card_predictor.feature_metadata.get_features())
-sepsis_features = set(sepsis_predictor.feature_metadata.get_features())
-all_features = allcause_features.union(card_features).union(sepsis_features)
+card_features     = set(card_predictor.feature_metadata.get_features())
+sepsis_features   = set(sepsis_predictor.feature_metadata.get_features())
+all_features      = allcause_features.union(card_features).union(sepsis_features)
 feature_names_list = list(all_features)
 
-# Aggregate feature types (raw types from predictors)
+# raw type map (union)
 feature_types = {}
 feature_types.update(predictor.feature_metadata.type_map_raw)
 feature_types.update(card_predictor.feature_metadata.type_map_raw)
 feature_types.update(sepsis_predictor.feature_metadata.type_map_raw)
 
-# ------------------------------------------------------------
-# Display names mapping (from your original app)
-# ------------------------------------------------------------
+# ---------- Display names mapping (from original app) ----------
 display_names = {
     '昏迷/意识丧失模糊': 'Coma(0/1)',
     '心肺复苏': 'Use of Cardiopulmonary Resuscitation(0/1)',
@@ -118,13 +111,10 @@ display_names = {
     '平均红细胞血红蛋白浓度MCHC': 'Mean Corpuscular Hemoglobin Concentration(g/L)',
     '心衰': 'Heart Failure(0/1)'
 }
-for feature in feature_names_list:
-    if feature not in display_names:
-        display_names[feature] = feature  # fallback: original name
+for f in feature_names_list:
+    display_names.setdefault(f, f)  # fallback to original name if missing
 
-# ------------------------------------------------------------
-# Bulk input UI (kept from your app)
-# ------------------------------------------------------------
+# ---------- Bulk input order & helpers ----------
 st.write('Alternatively, you can input all values separated by commas. If entered this way, the values will automatically populate each input field to ensure accurate recognition.')
 
 bulk_input_order = [
@@ -155,15 +145,16 @@ bulk_input_order = [
     'Activated Partial Thromboplastin Time(s)',
     'Heart Failure(0/1)'
 ]
+
 display_name_to_feature = {v: k for k, v in display_names.items()}
 feature_names_list_ordered = []
 for name in bulk_input_order:
-    feature = display_name_to_feature.get(name)
-    if feature:
-        feature_names_list_ordered.append(feature)
-    else:
+    feat = display_name_to_feature.get(name)
+    if feat is None:
         st.error(f"Display name '{name}' does not correspond to any feature.")
         st.stop()
+    feature_names_list_ordered.append(feat)
+
 num_features = len(feature_names_list_ordered)
 
 st.write(', '.join(bulk_input_order))
@@ -174,11 +165,12 @@ st.write('(3) NAR: Neutrophil Count / Albumin')
 st.write('(4) NLR: Neutrophil Count / Lymphocyte Count')
 st.write('(5) CAR: C-Reactive Protein / Albumin')
 
-bulk_input = st.text_area('Enter all values separated by commas. If entered this way, the values will automatically populate each input field to ensure accurate recognition.', value='', height=100)
+bulk_input = st.text_area(
+    'Enter all values separated by commas. If entered this way, the values will automatically populate each input field to ensure accurate recognition.',
+    value='', height=100
+)
 
-# ------------------------------------------------------------
-# Gauge plot function (kept)
-# ------------------------------------------------------------
+# ---------- Gauge plot (kept) ----------
 def create_ring_plot(probability, title):
     if probability < 0.33:
         color = 'green'
@@ -186,43 +178,40 @@ def create_ring_plot(probability, title):
         color = 'orange'
     else:
         color = 'red'
-    fig = go.Figure(go.Pie(values=[probability, 1 - probability],
-                           hole=0.7,
-                           marker=dict(colors=[color, 'lightgray']),
-                           hoverinfo='none'))
+    fig = go.Figure(go.Pie(
+        values=[probability, 1 - probability],
+        hole=0.7,
+        marker=dict(colors=[color, 'lightgray']),
+        hoverinfo='none'
+    ))
     fig.update_traces(textinfo='none')
     fig.update_layout(
         annotations=[dict(text=f"{probability:.2%}", x=0.5, y=0.5, font_size=20, showarrow=False)],
-        title_text=title,
-        showlegend=False,
-        margin=dict(l=20, r=20, t=40, b=20)
+        title_text=title, showlegend=False, margin=dict(l=20, r=20, t=40, b=20)
     )
     return fig
 
-# ------------------------------------------------------------
-# Input widgets
-# ------------------------------------------------------------
+# ---------- Build input widgets ----------
 input_data = {}
 missing_features = []
 columns_per_row = 6
 rows = (num_features + columns_per_row - 1) // columns_per_row
 
-# Process bulk input
+# parse bulk input
 if bulk_input.strip() != '':
-    bulk_values = bulk_input.strip().split(',')
-    if len(bulk_values) != len(feature_names_list_ordered):
+    bulk_values = [x.strip() for x in bulk_input.strip().split(',')]
+    if len(bulk_values) != num_features:
         st.error('The number of values entered does not match the number of features.')
     else:
         for feature, value in zip(feature_names_list_ordered, bulk_values):
-            feature_type = feature_types.get(feature, 'float')
-            value = value.strip()
-            if feature_type in ['int', 'float']:
+            ftype = feature_types.get(feature, 'float')
+            if ftype in ['int', 'float']:
                 try:
                     value = float(value)
                 except ValueError:
                     st.error(f"Invalid numeric value for {display_names.get(feature, feature)}: {value}")
                     st.stop()
-            elif feature_type == 'datetime':
+            elif ftype == 'datetime':
                 try:
                     value = pd.to_datetime(value)
                 except ValueError:
@@ -230,123 +219,121 @@ if bulk_input.strip() != '':
                     st.stop()
             input_data[feature] = value
 
-# Render inputs
-for row in range(rows):
+# render inputs
+for r in range(rows):
     cols = st.columns(columns_per_row)
     for idx in range(columns_per_row):
-        feature_idx = row * columns_per_row + idx
-        if feature_idx < num_features:
-            feature = feature_names_list_ordered[feature_idx]
-            feature_type = feature_types.get(feature, 'float')
-            display_name = display_names.get(feature, feature)
-            with cols[idx]:
-                default_value = input_data.get(feature, '')
-                if default_value == '':
-                    if feature_type in ['int', 'float']:
-                        value = st.number_input(f"{display_name}:", key=feature)
-                    elif feature_type == 'object':
-                        value = st.text_input(f"{display_name}:", key=feature)
-                    elif feature_type == 'datetime':
-                        value = st.date_input(f"{display_name}:", key=feature)
-                    else:
-                        value = st.text_input(f"{display_name}:", key=feature)
+        k = r * columns_per_row + idx
+        if k >= num_features:
+            continue
+        feature = feature_names_list_ordered[k]
+        ftype = feature_types.get(feature, 'float')
+        display_name = display_names.get(feature, feature)
+        with cols[idx]:
+            default_value = input_data.get(feature, '')
+            if default_value == '':
+                if ftype in ['int', 'float']:
+                    value = st.number_input(f"{display_name}:", key=feature)
+                elif ftype == 'object':
+                    value = st.text_input(f"{display_name}:", key=feature)
+                elif ftype == 'datetime':
+                    value = st.date_input(f"{display_name}:", key=feature)
                 else:
-                    if feature_type in ['int', 'float']:
-                        value = st.number_input(f"{display_name}:", value=float(default_value), key=feature)
-                    elif feature_type == 'object':
-                        value = st.text_input(f"{display_name}:", value=str(default_value), key=feature)
-                    elif feature_type == 'datetime':
-                        value = st.date_input(f"{display_name}:", value=pd.to_datetime(default_value), key=feature)
-                    else:
-                        value = st.text_input(f"{display_name}:", value=str(default_value), key=feature)
-                input_data[feature] = value
+                    value = st.text_input(f"{display_name}:", key=feature)
+            else:
+                if ftype in ['int', 'float']:
+                    value = st.number_input(f"{display_name}:", value=float(default_value), key=feature)
+                elif ftype == 'object':
+                    value = st.text_input(f"{display_name}:", value=str(default_value), key=feature)
+                elif ftype == 'datetime':
+                    value = st.date_input(f"{display_name}:", value=pd.to_datetime(default_value), key=feature)
+                else:
+                    value = st.text_input(f"{display_name}:", value=str(default_value), key=feature)
+            input_data[feature] = value
 
-# ------------------------------------------------------------
-# SHAP helpers (robust, model-agnostic)
-# ------------------------------------------------------------
+# ---------- SHAP helpers ----------
 def get_positive_label(predictor_obj):
-    # For binary: class_labels = [negative, positive]
     try:
         labels = predictor_obj.class_labels
         if labels is not None and len(labels) == 2:
             return labels[1]
     except Exception:
         pass
-    return 1  # safe default
+    return 1  # default
 
 def proba_callable_for_shap(predictor_obj, feature_names, positive_label):
+    # returns f(X) -> 1D array of P(positive)
     def f(X):
-        # X arrives as numpy array from SHAP; reconvert to DataFrame with exact columns
         X_df = pd.DataFrame(X, columns=feature_names)
         proba = predictor_obj.predict_proba(X_df)
-        # Normalize to DataFrame
         if isinstance(proba, pd.DataFrame):
-            cols = list(proba.columns)
-            # Try exact match of positive label
             if positive_label in proba.columns:
                 arr = proba[positive_label].to_numpy()
             elif str(positive_label) in proba.columns:
                 arr = proba[str(positive_label)].to_numpy()
+            elif 1 in proba.columns:
+                arr = proba[1].to_numpy()
+            elif '1' in proba.columns:
+                arr = proba['1'].to_numpy()
             else:
-                # fallback: try column '1', else last column
-                if 1 in proba.columns:
-                    arr = proba[1].to_numpy()
-                elif '1' in proba.columns:
-                    arr = proba['1'].to_numpy()
-                else:
-                    arr = proba.iloc[:, -1].to_numpy()
+                arr = proba.iloc[:, -1].to_numpy()
         else:
-            # ndarray shape (n,2) or (n,)
             arr = np.asarray(proba)
             if arr.ndim == 2 and arr.shape[1] >= 2:
                 arr = arr[:, 1]
             else:
                 arr = arr.reshape(-1)
-        return arr  # 1D shape (n,)
+        return arr.astype(float)
     return f
 
-def compute_local_shap_for_model(predictor_obj, x_row_df, background_df, feature_map):
+def compute_local_shap_kernel(predictor_obj, x_row_df, background_df, feature_map, max_bg=50):
     """
-    predictor_obj: AutoGluon TabularPredictor
-    x_row_df: DataFrame with exactly the model's features (one row)
-    background_df: DataFrame with same columns (many rows)
-    feature_map: dict original_feature_name -> display_name
-    Returns: shap_df (mapped names), shap_exp (Explanation), base_value, fx (pos prob)
+    Robust per-patient SHAP on probability scale using KernelExplainer.
+    Returns: shap_df (with display names), expected_value (base), fx
     """
     feature_names = list(x_row_df.columns)
     pos_label = get_positive_label(predictor_obj)
     f = proba_callable_for_shap(predictor_obj, feature_names, pos_label)
 
-    # SHAP masker & explainer
-    masker = shap.maskers.Independent(background_df, max_samples=min(200, len(background_df)))
-    explainer = shap.Explainer(f, masker)  # model-agnostic; works for NN & trees
+    # background: exact columns, clean, capped for speed
+    bg = background_df[feature_names].dropna()
+    if len(bg) == 0:
+        # fallback: use the row itself as background
+        bg = x_row_df.copy()
+    else:
+        bg = bg.sample(n=min(max_bg, len(bg)), random_state=0)
 
-    exp = explainer(x_row_df)  # shap.Explanation
-    # exp.values -> shape (1, n_features)
-    shap_vals = np.array(exp.values).reshape(1, -1)[0]
-    base_val = float(np.array(exp.base_values).reshape(-1)[-1])
+    # KernelExplainer on probability scale
+    explainer = shap.KernelExplainer(f, bg, link="identity")
+    shap_vals = explainer.shap_values(x_row_df, nsamples="auto")
+    # shap_vals can be list or ndarray depending on SHAP version
+    shap_arr = np.array(shap_vals)
+    if shap_arr.ndim == 3:
+        # shape: (n_outputs, n_rows, n_features) -> pick output 0
+        shap_row = shap_arr[0, 0, :]
+    elif shap_arr.ndim == 2:
+        # shape: (n_rows, n_features)
+        shap_row = shap_arr[0, :]
+    else:
+        shap_row = shap_arr.reshape(-1)
 
-    # actual predicted probability for sanity check
+    expected_value = float(np.array(explainer.expected_value).reshape(-1)[-1])
     fx = float(f(x_row_df.values)[0])
 
-    # Build DataFrame and map to display names
     shap_df = pd.DataFrame({
         'feature': feature_names,
         'value': [x_row_df.iloc[0][c] for c in feature_names],
-        'shap': shap_vals
+        'shap': shap_row.astype(float)
     })
-    shap_df['abs_shap'] = np.abs(shap_df['shap'])
-    shap_df['direction'] = np.where(shap_df['shap'] >= 0, '+', '−')
+    shap_df['abs_shap'] = shap_df['shap'].abs()
     shap_df.sort_values('abs_shap', ascending=False, inplace=True)
-
-    # Map to display names for UI consistency
     shap_df['feature_display'] = shap_df['feature'].map(lambda x: feature_map.get(x, x))
-    return shap_df, exp, base_val, fx
+    return shap_df, expected_value, fx
 
 def plot_topk_bar(ax, shap_df, top_k=8, title=""):
     top = shap_df.head(top_k).copy()
     labels = [f"{r.feature_display} = {r.value}" for r in top.itertuples(index=False)]
-    y = np.arange(len(top))[::-1]  # invert for top at top
+    y = np.arange(len(top))[::-1]
     ax.barh(y, top['shap'].values[::-1], align='center')
     ax.set_yticks(y, labels=labels[::-1], fontsize=8)
     ax.axvline(0, color='k', linewidth=0.6)
@@ -370,7 +357,7 @@ def export_figure6(input_display_pairs,
                    outfile_svg="figure6_multiplot.svg"):
     """
     Build a 3x3 layout:
-      A: inputs table, B–D: donuts, E–G: SHAP bars
+      A: inputs table; B–D: donuts; E–G: SHAP bars.
     """
     plt.close('all')
     fig = plt.figure(figsize=(12, 8), dpi=300)
@@ -378,9 +365,7 @@ def export_figure6(input_display_pairs,
 
     # Panel A: inputs table
     axA = fig.add_subplot(gs[0, 0])
-    # Render as a table (two columns)
-    cell_text = []
-    cell_colors = []
+    cell_text, cell_colors = [], []
     for name, val, imputed in input_display_pairs:
         flag = "•" if imputed else ""
         cell_text.append([name, f"{val}{flag}"])
@@ -415,17 +400,48 @@ def export_figure6(input_display_pairs,
         fig.savefig(outfile_svg, bbox_inches='tight')
     return outfile_png, outfile_svg
 
-# ------------------------------------------------------------
-# Predict & Explain
-# ------------------------------------------------------------
+def plot_custom_waterfall(ax, shap_df, base_value, fx, top_k=10, title=""):
+    """
+    Draw a probability-scale waterfall without using shap.plots.waterfall (avoids PIL errors).
+    base_value + sum(shap) ~= fx.
+    """
+    top = shap_df.head(top_k).copy()
+    # sort so negative first -> leftward, positive next -> rightward for clean stacking
+    top = top.sort_values('shap')
+    contribs = top['shap'].values
+    names = top['feature_display'].values
+
+    # cumulative positions
+    starts = [base_value]
+    for s in contribs[:-1]:
+        starts.append(starts[-1] + s)
+    starts = np.array(starts)
+    widths = np.abs(contribs)
+    lefts = np.where(contribs >= 0, starts, starts + contribs)
+
+    y = np.arange(len(top))
+    colors = ['red' if s > 0 else 'blue' for s in contribs]
+    ax.barh(y, widths, left=lefts, color=colors, align='center', edgecolor='none')
+    ax.set_yticks(y, labels=[str(n) for n in names], fontsize=8)
+    ax.axvline(base_value, color='gray', linestyle='--', linewidth=0.8, label='base')
+    ax.axvline(fx, color='black', linestyle='-', linewidth=1.0, label='prediction')
+    ax.set_xlabel("Predicted probability")
+    if title:
+        ax.set_title(title, fontsize=12)
+    ax.legend(frameon=False, fontsize=8)
+    # Ensure visible padding
+    xmin = min(base_value, fx, lefts.min()) - 0.02
+    xmax = max(base_value, fx, (lefts + widths).max()) + 0.02
+    ax.set_xlim(xmin, xmax)
+
+# ---------- Prediction & Explanations ----------
 if st.button('Predict'):
-    # 1) Build input row
+    # build input row
     input_df = pd.DataFrame([input_data])
 
-    # 2) Impute missing values (record what we imputed for transparency)
+    # impute missing & record what we imputed
     missing_features = []
     missing_values_used = {}
-
     for feature in feature_names_list_ordered:
         if feature not in input_df.columns:
             input_df[feature] = np.nan
@@ -446,13 +462,12 @@ if st.button('Predict'):
                 missing_features.append(display_names.get(feature, feature))
                 missing_values_used[display_names.get(feature, feature)] = None
 
-    # Datetime normalization
-    datetime_features = [f for f, t in feature_types.items() if t == 'datetime']
-    for feature in datetime_features:
-        if feature in input_df.columns:
+    # normalize datetimes
+    for feature, ftype in feature_types.items():
+        if ftype == 'datetime' and feature in input_df.columns:
             input_df[feature] = pd.to_datetime(input_df[feature])
 
-    # 3) Model predictions
+    # predictions
     prediction = predictor.predict(input_df)
     probability = predictor.predict_proba(input_df)
     card_prediction = card_predictor.predict(input_df)
@@ -460,7 +475,6 @@ if st.button('Predict'):
     sepsis_prediction = sepsis_predictor.predict(input_df)
     sepsis_probability = sepsis_predictor.predict_proba(input_df)
 
-    # Extract P(positive)
     def _pick_pos(proba_df, predictor_obj):
         pos = get_positive_label(predictor_obj)
         if isinstance(proba_df, pd.DataFrame):
@@ -478,11 +492,12 @@ if st.button('Predict'):
             if arr.ndim == 2 and arr.shape[1] >= 2:
                 return float(arr[0, 1])
             return float(arr[0])
+
     risk_of_death_probability = _pick_pos(probability, predictor)
     card_risk_probability = _pick_pos(card_probability, card_predictor)
     sepsis_risk_probability = _pick_pos(sepsis_probability, sepsis_predictor)
 
-    # 4) Show results (gauges)
+    # results UI
     st.subheader('Prediction Results')
     cols = st.columns(3)
 
@@ -507,94 +522,92 @@ if st.button('Predict'):
         st.plotly_chart(create_ring_plot(sepsis_risk_probability, "Probability of Infection-related Mortality"), use_container_width=True)
         st.write(f"Predicted Risk of Infection-related mortality: {sepsis_risk_probability:.2%}")
 
-    # 5) Show which variables were imputed
+    # imputed variables transparency
     if missing_features:
         st.warning("The following variables were missing and have been filled with average/mode values:")
         for var in missing_features:
             st.write(f"{var}: {missing_values_used[var]}")
 
-    # 6) Patient‑specific SHAP (the key fix: use each model’s own features)
+    # ---------- Patient-specific SHAP ----------
     st.markdown("### Patient‑specific feature contributions (SHAP)")
     st.caption("Bars to the right increase predicted risk; bars to the left decrease risk (relative to the model’s base rate).")
 
-    # Prepare background samples per model (exact feature sets)
+    # exact per-model features & subsets
     allcause_feats = [f for f in predictor.features() if f in emer_clean.columns]
     cardio_feats   = [f for f in card_predictor.features() if f in emer_clean.columns]
     infect_feats   = [f for f in sepsis_predictor.features() if f in emer_clean.columns]
 
-    # Ensure the input row covers these subsets
     x_allcause = input_df[allcause_feats].copy()
     x_cardio   = input_df[cardio_feats].copy()
     x_infect   = input_df[infect_feats].copy()
 
-    # Background: sample rows with no missing values in those subsets
-    bg_allcause = emer_clean[allcause_feats].dropna().sample(n=min(200, len(emer_clean)), random_state=0)
-    bg_cardio   = emer_clean[cardio_feats].dropna().sample(n=min(200, len(emer_clean)), random_state=0)
-    bg_infect   = emer_clean[infect_feats].dropna().sample(n=min(200, len(emer_clean)), random_state=0)
+    bg_allcause = emer_clean[allcause_feats]
+    bg_cardio   = emer_clean[cardio_feats]
+    bg_infect   = emer_clean[infect_feats]
 
-    shap_allcause_df, exp_allcause, base_allcause, fx_allcause = compute_local_shap_for_model(
-        predictor, x_allcause, bg_allcause, display_names
+    shap_allcause_df, base_allcause, fx_allcause = compute_local_shap_kernel(
+        predictor, x_allcause, bg_allcause, display_names, max_bg=50
     )
-    shap_cardio_df, exp_cardio, base_cardio, fx_cardio = compute_local_shap_for_model(
-        card_predictor, x_cardio, bg_cardio, display_names
+    shap_cardio_df, base_cardio, fx_cardio = compute_local_shap_kernel(
+        card_predictor, x_cardio, bg_cardio, display_names, max_bg=50
     )
-    shap_infect_df, exp_infect, base_infect, fx_infect = compute_local_shap_for_model(
-        sepsis_predictor, x_infect, bg_infect, display_names
+    shap_infect_df, base_infect, fx_infect = compute_local_shap_kernel(
+        sepsis_predictor, x_infect, bg_infect, display_names, max_bg=50
     )
 
-    # Three columns: show bar plots + top tables
+    # three columns of SHAP bars + tables
     ecol = st.columns(3)
-    # All-cause
+
+    def _fmt_table(df):
+        out = df[['feature_display','value','shap']].head(8).rename(
+            columns={'feature_display':'feature','shap':'contribution'}
+        ).copy()
+        # numeric formatting for readability
+        if 'contribution' in out.columns:
+            out['contribution'] = out['contribution'].astype(float).round(4)
+        return out
+
     with ecol[0]:
         st.markdown("**All‑cause: top drivers**")
         figA, axA = plt.subplots(figsize=(4, 3), dpi=150)
         plot_topk_bar(axA, shap_allcause_df, top_k=8, title="")
         st.pyplot(figA, clear_figure=True)
-        st.dataframe(shap_allcause_df[['feature_display','value','shap']].head(8).rename(
-            columns={'feature_display':'feature','shap':'contribution'}))
+        st.dataframe(_fmt_table(shap_allcause_df), use_container_width=True)
 
-    # Cardiovascular
     with ecol[1]:
         st.markdown("**Cardiovascular: top drivers**")
         figB, axB = plt.subplots(figsize=(4, 3), dpi=150)
         plot_topk_bar(axB, shap_cardio_df, top_k=8, title="")
         st.pyplot(figB, clear_figure=True)
-        st.dataframe(shap_cardio_df[['feature_display','value','shap']].head(8).rename(
-            columns={'feature_display':'feature','shap':'contribution'}))
+        st.dataframe(_fmt_table(shap_cardio_df), use_container_width=True)
 
-    # Infection-related
     with ecol[2]:
         st.markdown("**Infection‑related: top drivers**")
         figC, axC = plt.subplots(figsize=(4, 3), dpi=150)
         plot_topk_bar(axC, shap_infect_df, top_k=8, title="")
         st.pyplot(figC, clear_figure=True)
-        st.dataframe(shap_infect_df[['feature_display','value','shap']].head(8).rename(
-            columns={'feature_display':'feature','shap':'contribution'}))
+        st.dataframe(_fmt_table(shap_infect_df), use_container_width=True)
 
-    # Optional: per-patient SHAP waterfall (compact) – one example (all-cause)
+    # ---------- Custom waterfall plots (no PIL error) ----------
     with st.expander("Show SHAP waterfall plots (per‑patient)"):
         wcols = st.columns(3)
         with wcols[0]:
             st.markdown("All‑cause waterfall")
-            plt.close('all')
-            figW = plt.figure(figsize=(5, 3), dpi=150)
-            shap.plots.waterfall(exp_allcause[0], show=False, max_display=10)
+            figW, axW = plt.subplots(figsize=(5, 3), dpi=150)
+            plot_custom_waterfall(axW, shap_allcause_df, base_allcause, fx_allcause, top_k=10, title="")
             st.pyplot(figW, clear_figure=True)
         with wcols[1]:
             st.markdown("Cardiovascular waterfall")
-            plt.close('all')
-            figW2 = plt.figure(figsize=(5, 3), dpi=150)
-            shap.plots.waterfall(exp_cardio[0], show=False, max_display=10)
+            figW2, axW2 = plt.subplots(figsize=(5, 3), dpi=150)
+            plot_custom_waterfall(axW2, shap_cardio_df, base_cardio, fx_cardio, top_k=10, title="")
             st.pyplot(figW2, clear_figure=True)
         with wcols[2]:
             st.markdown("Infection‑related waterfall")
-            plt.close('all')
-            figW3 = plt.figure(figsize=(5, 3), dpi=150)
-            shap.plots.waterfall(exp_infect[0], show=False, max_display=10)
+            figW3, axW3 = plt.subplots(figsize=(5, 3), dpi=150)
+            plot_custom_waterfall(axW3, shap_infect_df, base_infect, fx_infect, top_k=10, title="")
             st.pyplot(figW3, clear_figure=True)
 
-    # 7) Export camera‑ready Figure 6 (multi-panel)
-    # Prepare inputs table for export (Panel A): mark imputed values
+    # ---------- Export camera‑ready Figure 6 ----------
     ordered_display_pairs = []
     for feat in feature_names_list_ordered:
         disp = display_names.get(feat, feat)
