@@ -1,3 +1,5 @@
 streamlit==1.41.0
 autogluon
 xgboost==1.6.0
+shap==0.46
+matplotlib>=3.7
