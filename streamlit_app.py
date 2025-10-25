@@ -336,6 +336,68 @@ if st.button('Predict'):
     card_risk_probability = card_probability.iloc[0][1]
     sepsis_risk_probability = sepsis_probability.iloc[0][1]
 
+    # === SHAP BACKGROUND (lightweight sample from emer_clean) ===
+    background = emer_clean.sample(n=min(100, len(emer_clean)), random_state=0)
+
+    # === Compute local SHAP for each model (class=1) ===
+    shap_allcause_df, base_allcause, fx_allcause = compute_local_shap(
+        predictor, input_df[feature_names_list_ordered], background, prefers_tree=False  # neural net -> kernel
+    )
+    shap_cardio_df, base_cardio, fx_cardio = compute_local_shap(
+        card_predictor, input_df[feature_names_list_ordered], background, prefers_tree=True
+    )
+    shap_infect_df, base_infect, fx_infect = compute_local_shap(
+        sepsis_predictor, input_df[feature_names_list_ordered], background, prefers_tree=True
+    )
+
+    # === Display per-patient explanations in Streamlit ===
+    st.markdown("### Patient‑specific feature contributions (SHAP)")
+    st.caption("Bars to the right increase predicted risk; bars to the left decrease risk (relative to the model’s base rate).")
+
+    # Three columns for the three models
+    ecols = st.columns(3)
+    with ecols[0]:
+        st.markdown("**All‑cause: top drivers**")
+        st.dataframe(shap_allcause_df[['feature','value','shap']].head(8).rename(columns={'shap':'contribution'}))
+    with ecols[1]:
+        st.markdown("**Cardiovascular: top drivers**")
+        st.dataframe(shap_cardio_df[['feature','value','shap']].head(8).rename(columns={'shap':'contribution'}))
+    with ecols[2]:
+        st.markdown("**Infection‑related: top drivers**")
+        st.dataframe(shap_infect_df[['feature','value','shap']].head(8).rename(columns={'shap':'contribution'}))
+
+    # === Prepare inputs table for export (Panel A) ===
+    # Mark imputed variables by comparing against 'missing_values_used' built earlier in your code.
+    ordered_display_pairs = []
+    for feat in feature_names_list_ordered:
+        disp = display_names.get(feat, feat)
+        val  = input_df.loc[0, feat]
+        is_imp = disp in missing_values_used  # imputed earlier
+        # Format numeric with sensible precision
+        if isinstance(val, float):
+            vs = f"{val:.3g}"
+        else:
+            vs = str(val)
+        ordered_display_pairs.append((disp, vs, is_imp))
+
+    # === Export multi-panel figure button ===
+    if st.button("Export camera‑ready Figure 6 (PNG + SVG)"):
+        png_path, svg_path = export_figure6(
+            input_display_pairs=ordered_display_pairs,
+            risk_allcause=float(risk_of_death_probability),
+            risk_cardio=float(card_risk_probability),
+            risk_infection=float(sepsis_risk_probability),
+            shap_allcause=shap_allcause_df,
+            shap_cardio=shap_cardio_df,
+            shap_infect=shap_infect_df,
+            outfile_png="figure6_multiplot.png",
+            outfile_svg="figure6_multiplot.svg",
+        )
+        with open(png_path, "rb") as f:
+            st.download_button("Download Figure 6 (PNG)", data=f, file_name="Figure6.png", mime="image/png")
+        with open(svg_path, "rb") as f:
+            st.download_button("Download Figure 6 (SVG)", data=f, file_name="Figure6.svg", mime="image/svg+xml")
+
     # Display results in parallel
     st.subheader('Prediction Results')
 
